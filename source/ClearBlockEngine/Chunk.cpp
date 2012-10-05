@@ -5,29 +5,51 @@ using namespace cbe;
 //////////////////////////////////////////////////////////////////////////
 // chunk triangle merged
 // 
-Chunk::Chunk(XMFLOAT3 pos, unsigned __int8 chunkSize, float blockSize, ChunkManager* pMgr )
-	: m_vecPos(pos), m_size(chunkSize), m_blockSize(blockSize)
+Chunk::Chunk(ChunkManager* pManager, int ix, int iy, int iz, XMFLOAT3 pos, unsigned __int8 chunkSize, float blockSize, ChunkManager* pMgr )
+	: m_pManager(pManager), m_ix(ix), m_iy(iy), m_iz(iz), m_vecPos(pos), m_size(chunkSize), m_blockSize(blockSize), m_numTris(0), m_numVertices(0),
+		m_numActiveBlocks(0), m_numIndices(0), m_numBlocksVisible(0)
 {
 	m_pBlocks = new Block[chunkSize * chunkSize * chunkSize];
+	m_upToDate = false;
+	m_building = false;
+	
+	InitializeCriticalSection(&m_criticalSection);
 }
 Chunk::~Chunk( void )
 {
+	EnterCriticalSection(&m_criticalSection);
+
 	SAFE_DELETE_ARRAY(m_pBlocks);
 
 	m_pVertexBuffer->ResetData();
 	m_pIndexBuffer->ResetData();
+
+	LeaveCriticalSection(&m_criticalSection);
+	DeleteCriticalSection(&m_criticalSection);
 }
 
-void Chunk::SetBlockState( int x, int y, int z, bool state )
+void Chunk::SetBlockState( int x, int y, int z, BOOL state )
 {
+	EnterCriticalSection(&m_criticalSection);
+
 	m_pBlocks[_3dto1d(x, y, z)].SetActive(state);
+	m_upToDate = false;
+
+	LeaveCriticalSection(&m_criticalSection);
 }
-void Chunk::SetBlockState( int index, bool state )
-{
+void Chunk::SetBlockState( int index, BOOL state )
+{	
+	EnterCriticalSection(&m_criticalSection);
+
 	m_pBlocks[index].SetActive(state);
+	m_upToDate = false;
+
+	LeaveCriticalSection(&m_criticalSection);
 }
 bool Chunk::GetBlockState( int x, int y, int z )
 {
+	EnterCriticalSection(&m_criticalSection);
+
 	if ( x < 0 || x >= m_size ||
 		 y < 0 || y >= m_size ||
 		 z < 0 || z >= m_size)
@@ -35,54 +57,123 @@ bool Chunk::GetBlockState( int x, int y, int z )
 		return false;
 	}
 
-	return m_pBlocks[_3dto1d(x, y, z)].Active();
+	bool active =  m_pBlocks[_3dto1d(x, y, z)].Active();
+	LeaveCriticalSection(&m_criticalSection);
+	return active;
+}
+bool Chunk::GetBlockState( int index )
+{
+	EnterCriticalSection(&m_criticalSection);
+	bool active =  m_pBlocks[index].Active();
+	LeaveCriticalSection(&m_criticalSection);
+	return active;
 }
 
 void Chunk::SetBlockType( int x, int y, int z, unsigned __int16 type )
 {
+	EnterCriticalSection(&m_criticalSection);
+
 	m_pBlocks[_3dto1d(x, y, z)].SetType(type);
+	m_upToDate = false;
+
+	LeaveCriticalSection(&m_criticalSection);
 }
 void Chunk::SetBlockType( int index, unsigned __int16 type )
 {
+	EnterCriticalSection(&m_criticalSection);
+
 	m_pBlocks[index].SetType(type);
+	m_upToDate = false;
+
+	LeaveCriticalSection(&m_criticalSection);
 }
 unsigned __int16 Chunk::GetBlockType( int x, int y, int z )
 {
-	return m_pBlocks[z + y * m_size + x * m_size * m_size].Type();
+	EnterCriticalSection(&m_criticalSection);
+	unsigned __int16 type = m_pBlocks[z + y * m_size + x * m_size * m_size].Type();
+	LeaveCriticalSection(&m_criticalSection);
+
+	return type;
 }
 
 void Chunk::SetBlockGroup( int index, BYTE group )
 {
+	EnterCriticalSection(&m_criticalSection);
+
 	m_pBlocks[index].SetGroup(group);
+	m_upToDate = false;
+
+	LeaveCriticalSection(&m_criticalSection);
 }
 
 bool Chunk::Init()
 {
 	m_pIndexBuffer = cgl::CD3D11IndexBuffer::Create(sizeof(DWORD), D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
-	m_pVertexBuffer = cgl::CD3D11VertexBuffer::Create(sizeof(VertexNormalTextureColor), D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+	m_pVertexBuffer = cgl::CD3D11VertexBuffer::Create(sizeof(BlockVertex), D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
+
 	return true;
+}
+bool Chunk::Update()
+{
+	EnterCriticalSection(&m_criticalSection);
+	if (!m_building)
+	{
+		if (m_numTris != 0)
+		{
+			m_pVertexBuffer->Update();
+			m_pIndexBuffer->Update();
+		}
+
+		LeaveCriticalSection(&m_criticalSection);
+		return true;
+	}
+	LeaveCriticalSection(&m_criticalSection);
+	return false;
 }
 void Chunk::Render()
 {
-	m_pVertexBuffer->Bind();
-	m_pIndexBuffer->Bind();
-	m_pIndexBuffer->Draw();
+	EnterCriticalSection(&m_criticalSection);
+	if (m_numTris != 0)
+	{
+		m_pVertexBuffer->Bind();
+		m_pIndexBuffer->Bind();
+		m_pIndexBuffer->Draw();
+	}
+	LeaveCriticalSection(&m_criticalSection);
 }
+void Chunk::RenderBatched( UINT* pOffset )
+{
+	if (m_numTris == 0)
+		return;
+
+	m_pIndexBuffer->Bind();
+	m_pIndexBuffer->Draw(0, m_numIndices, *pOffset);
+	(*pOffset) += m_numVertices;
+}
+
 bool Chunk::Build(ChunkManager* pMgr)
 {
-	m_numActiveBlocks = 0;
-	m_numBlocksVisible = 0;
-	m_numindices = 0;
-	m_numTris = 0;
-	m_numVertices = 0;
+	bool leave = false;
+	EnterCriticalSection(&m_criticalSection);
+	leave = m_building || m_upToDate;
+	LeaveCriticalSection(&m_criticalSection);
 
+	if (leave)
+		return false;
+
+	EnterCriticalSection(&m_criticalSection);
+	m_building = true;
 	m_pVertexBuffer->ResetData();
 	m_pIndexBuffer->ResetData();
+	m_numActiveBlocks = 0;
+	m_numBlocksVisible = 0;
+	m_numIndices = 0;
+	m_numTris = 0;
+	m_numVertices = 0;
+	LeaveCriticalSection(&m_criticalSection);
 
 	BLOCK_INFO* pBlockInfo = new BLOCK_INFO[m_size * m_size * m_size];
 	ZeroMemory(pBlockInfo, m_size * m_size * m_size * sizeof(BLOCK_INFO));
-
-	BlockTypeManager* pTypeMgr = pMgr->TypeManager();
 
 	for (int z = 0; z < m_size; z++)
 	{
@@ -93,12 +184,13 @@ bool Chunk::Build(ChunkManager* pMgr)
 				GetBlockInfo(x, y, z, pBlockInfo);
 				if(pBlockInfo[_3dto1d(x, y, z)].info & BLOCK_VISIBLE)
 				{
+					EnterCriticalSection(&m_criticalSection);
 					m_numBlocksVisible++;
-
 					unsigned __int16 blockTypeIndex = m_pBlocks[_3dto1d(x, y, z)].Type();
 					unsigned __int16 blockTypeGroup = m_pBlocks[_3dto1d(x, y, z)].Group();
+					LeaveCriticalSection(&m_criticalSection);
 
-					BlockType* type = pTypeMgr->GetType(blockTypeIndex);
+					BlockType* type = pMgr->TypeManager()->GetType(blockTypeIndex);
 					bool invalidType = false;
 					if (!type)
 					{
@@ -112,7 +204,7 @@ bool Chunk::Build(ChunkManager* pMgr)
 					if (numRects == 0)
 						continue;
 
-					VertexNormalTextureColor* pVerts = new VertexNormalTextureColor[numRects * 4];
+					BlockVertex* pVerts = new BlockVertex[numRects * 4];
 					DWORD* pIndices = new DWORD[numRects * 6];
 					DWORD baseIndices[6] = { 0, 1, 2, 0, 2, 3};
 					for (UINT rect = 0; rect < numRects; rect++)
@@ -120,33 +212,35 @@ bool Chunk::Build(ChunkManager* pMgr)
 						// Vertices
 						for (int i = 0; i < 4; i++)
 						{
-							pVerts[rect * 4 + i].typeIndex = type->Id();
+							pVerts[rect * 4 + i].indices[VERT_INDEX_TYPE] = type->Id();
+							pVerts[rect * 4 + i].indices[VERT_INDEX_NORMAL] = rects[rect].normalIndex;
 							pVerts[rect * 4 + i].pos = rects[rect].corners[i];
-							pVerts[rect * 4 + i].normal = rects[rect].normal;
-							pVerts[rect * 4 + i].color = type->Color();
 							pVerts[rect * 4 + i].texCoord = rects[rect].texCoords[i];
-							pVerts[rect * 4 + i].baseTexCoord = type->TexCoords();
-							pVerts[rect * 4 + i].relTexSize = XMFLOAT2( type->RelTexSize(),
-																		type->RelTexSize());
 						}
 
 						// indices
+						EnterCriticalSection(&m_criticalSection);
 						for (int i = 0; i < 6; i++)
 							pIndices[rect * 6 + i] = m_numVertices + rect * 4 + baseIndices[i];
+						LeaveCriticalSection(&m_criticalSection);
 					}
+
+					EnterCriticalSection(&m_criticalSection);
+
+					m_numVertices += numRects * 4;
+					m_numIndices += numRects * 6;
+					m_numTris += numRects * 2;
 
 					m_pIndexBuffer->AddData((char*)pIndices, numRects * 6);
 					m_pVertexBuffer->AddData((char*)pVerts, numRects * 4);
+
+					LeaveCriticalSection(&m_criticalSection);
 
 					SAFE_DELETE_ARRAY(pVerts);
 					SAFE_DELETE_ARRAY(pIndices);
 
 					if (invalidType)
 						SAFE_DELETE(type);
-
-					m_numVertices += numRects * 4;
-					m_numindices += numRects * 6;
-					m_numTris += numRects * 2;
 				}
 			}
 		}
@@ -154,36 +248,59 @@ bool Chunk::Build(ChunkManager* pMgr)
 
 	SAFE_DELETE_ARRAY(pBlockInfo);
 
-	
  	if (m_numTris > 0)
  	{
-		if (!m_pVertexBuffer->Update() || 
-			!m_pIndexBuffer->Update() )
-			return false;
+		EnterCriticalSection(&m_criticalSection);
+
+		LeaveCriticalSection(&m_criticalSection);
 	}
+
+	EnterCriticalSection(&m_criticalSection);
+	m_upToDate = true;
+	m_building = false;
+	LeaveCriticalSection(&m_criticalSection);
+
+	return true;
+}
+bool Chunk::BuildIt( ChunkManager* pMgr )
+{
+	EnterCriticalSection(&m_criticalSection);
+	if (m_building || m_upToDate)
+		return false;
+	LeaveCriticalSection(&m_criticalSection);
+
+	m_building = true;
 
 	return true;
 }
 
 void Chunk::GetBlockInfo( __in unsigned __int8 x, __in unsigned __int8 y, __in unsigned __int8 z, __inout BLOCK_INFO* pBlockInfo )
 {
+	EnterCriticalSection(&m_criticalSection);
+	unsigned short info = pBlockInfo[_3dto1d(x, y, z)].info;
+	LeaveCriticalSection(&m_criticalSection);
+
 	if (x < 0 || x >= m_size ||
 		y < 0 || y >= m_size ||
 		z < 0 || z >= m_size ||
-		pBlockInfo[_3dto1d(x, y, z)].info & BLOCK_CHECKED)
+		info & BLOCK_CHECKED)
 	{
 		return;
 	}
 
 	if (!GetBlockState(x, y, z))
 	{
-		pBlockInfo[_3dto1d(x, y, z)].info = 0;
-		pBlockInfo[_3dto1d(x, y, z)].info |= BLOCK_CHECKED;
+		info = 0;
+		info |= BLOCK_CHECKED;
+
+		EnterCriticalSection(&m_criticalSection);
+		pBlockInfo[_3dto1d(x, y, z)].info = info;
+		LeaveCriticalSection(&m_criticalSection);
 
 		return;
 	}
 
-	pBlockInfo[_3dto1d(x, y, z)].info |= BLOCK_ACTIVE;
+	info |= BLOCK_ACTIVE;
 	m_numActiveBlocks++;
 
 	unsigned __int8 numFacesVisible = 0;
@@ -203,28 +320,48 @@ void Chunk::GetBlockInfo( __in unsigned __int8 x, __in unsigned __int8 y, __in u
 		case BLOCK_FACE_VISIBLE_TOP:	{ iy++; } break; 
 		}
 
-		if (GetBlockState(ix, iy, iz) == false)
+		if (ix < 0 || ix >= m_size ||
+			iy < 0 || iy >= m_size ||
+			iz < 0 || iz >= m_size)
 		{
-			pBlockInfo[_3dto1d(x, y, z)].info |= face;
+// 			if (!m_pManager->GetBlockState(m_ix * m_size + ix, m_iy * m_size + iy, m_iz * m_size + iz))
+// 			{
+// 				info |= face;
+// 				numFacesVisible++;
+// 			}
+
+			info |= face;
+			numFacesVisible++;
+		}
+		else if (GetBlockState(ix, iy, iz) == false)
+		{
+			info |= face;
 			numFacesVisible++;
 		}
 	}
 
 	if (numFacesVisible > 0)
 	{
-		pBlockInfo[_3dto1d(x, y, z)].info |= BLOCK_VISIBLE;
+		info |= BLOCK_VISIBLE;
 	}
 
-	pBlockInfo[_3dto1d(x, y, z)].info |= BLOCK_CHECKED;
+	info |= BLOCK_CHECKED;
+
+	EnterCriticalSection(&m_criticalSection);
+	pBlockInfo[_3dto1d(x, y, z)].info = info;
+	LeaveCriticalSection(&m_criticalSection);
 }
 
 unsigned __int8 Chunk::Merge( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, unsigned __int16 group, BlockType& type, RECTANGLE* pRect, BLOCK_INFO* pBlockInfo )
 {
+	EnterCriticalSection(&m_criticalSection);
+	unsigned short info = pBlockInfo[_3dto1d(x, y, z)].info;
+	LeaveCriticalSection(&m_criticalSection);
+
 	unsigned __int8 numRects = 0;
 	for ( unsigned __int16 face = 1; face <= BLOCK_FACE_COUNT; face *= 4 )
 	{
- 		if (pBlockInfo[_3dto1d(x, y, z)].info & face  && 
- 		   (pBlockInfo[_3dto1d(x, y, z)].info & (2 * face)) != 2 * face)
+ 		if (info & face  && (info & (2 * face)) != 2 * face)
 		{
 			switch(face)
 			{
@@ -269,7 +406,9 @@ void Chunk::MergeXY( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 				break;
 			}
 
+			EnterCriticalSection(&m_criticalSection);
 			pBlockInfo[_3dto1d(ix, y, z)].info |= (2 * face);
+			LeaveCriticalSection(&m_criticalSection);
 		}
 	}
 
@@ -286,7 +425,9 @@ void Chunk::MergeXY( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 				break;
 			}
 
+			EnterCriticalSection(&m_criticalSection);
 			pBlockInfo[_3dto1d(ix, y, z)].info |= (2 * face);
+			LeaveCriticalSection(&m_criticalSection);
 		}
 	}
 
@@ -313,8 +454,12 @@ void Chunk::MergeXY( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 				break;
 			}
 
+			EnterCriticalSection(&m_criticalSection);
+
 			for (unsigned __int8 ix = left; ix <= right; ix++)
 				pBlockInfo[_3dto1d(ix, iy, z)].info |= (2 * face);
+
+			LeaveCriticalSection(&m_criticalSection);
 		}
 	}
 
@@ -341,8 +486,12 @@ void Chunk::MergeXY( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 				break;
 			}
 
+			EnterCriticalSection(&m_criticalSection);
+
 			for (unsigned __int8 ix = left; ix <= right; ix++)
 				pBlockInfo[_3dto1d(ix, iy, z)].info |= (2 * face);
+
+			LeaveCriticalSection(&m_criticalSection);
 		}
 	}
 	
@@ -353,7 +502,7 @@ void Chunk::MergeXY( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 		pRect->corners[1] = XMFLOAT4((float)(m_vecPos.x + left  * m_blockSize - m_blockSize / 2.0f),  (float)(m_vecPos.y + bottom * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.z + z * m_blockSize - m_blockSize / 2.0f), 1.0f);
 		pRect->corners[2] = XMFLOAT4((float)(m_vecPos.x + left  * m_blockSize - m_blockSize / 2.0f),  (float)(m_vecPos.y + top    * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.z + z * m_blockSize - m_blockSize / 2.0f), 1.0f);
 		pRect->corners[3] = XMFLOAT4((float)(m_vecPos.x + right * m_blockSize + m_blockSize / 2.0f),  (float)(m_vecPos.y + top    * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.z + z * m_blockSize - m_blockSize / 2.0f), 1.0f);
-		pRect->normal = VEC_NORMAL_FRONT;
+		pRect->normalIndex = VERT_NORMAL_FRONT_INDEX;
 	}
 	else
 	{
@@ -361,7 +510,7 @@ void Chunk::MergeXY( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 		pRect->corners[0] = XMFLOAT4((float)(m_vecPos.x + left  * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.y + bottom * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.z + z * m_blockSize + m_blockSize / 2.0f), 1.0f);
 		pRect->corners[3] = XMFLOAT4((float)(m_vecPos.x + left  * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.y + top    * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.z + z * m_blockSize + m_blockSize / 2.0f), 1.0f);
 		pRect->corners[2] = XMFLOAT4((float)(m_vecPos.x + right * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.y + top    * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.z + z * m_blockSize + m_blockSize / 2.0f), 1.0f);
-		pRect->normal = VEC_NORMAL_BACK;
+		pRect->normalIndex = VERT_NORMAL_BACK_INDEX;
 	}
 	
 	// build tex coords
@@ -382,7 +531,9 @@ void Chunk::MergeYZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 				break;
 			}
 
+			EnterCriticalSection(&m_criticalSection);
 			pBlockInfo[_3dto1d(x, y, iz)].info |= (2 * face);
+			LeaveCriticalSection(&m_criticalSection);
 		}
 	}
 
@@ -399,7 +550,9 @@ void Chunk::MergeYZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 				break;
 			}
 
+			EnterCriticalSection(&m_criticalSection);
 			pBlockInfo[_3dto1d(x, y, iz)].info |= (2 * face);
+			LeaveCriticalSection(&m_criticalSection);
 		}
 	}
 
@@ -427,8 +580,10 @@ void Chunk::MergeYZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 				break;
 			}
 
+			EnterCriticalSection(&m_criticalSection);
 			for (unsigned __int8 iz = left; iz <= right; iz++)
 				pBlockInfo[_3dto1d(x, iy, iz)].info |= (2 * face);
+			LeaveCriticalSection(&m_criticalSection);
 		}
 	}
 	
@@ -455,8 +610,10 @@ void Chunk::MergeYZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 				break;
 			}
 
+			EnterCriticalSection(&m_criticalSection);
 			for (unsigned __int8 iz = left; iz <= right; iz++)
 				pBlockInfo[_3dto1d(x, iy, iz)].info |= (2 * face);
+			LeaveCriticalSection(&m_criticalSection);
 		}
 	}
 
@@ -467,7 +624,7 @@ void Chunk::MergeYZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 		pRect->corners[0] = XMFLOAT4((float)(m_vecPos.x + x * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.y + bottom * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.z + left  * m_blockSize - m_blockSize / 2.0f), 1.0f);
 		pRect->corners[3] = XMFLOAT4((float)(m_vecPos.x + x * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.y + top    * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.z + left  * m_blockSize - m_blockSize / 2.0f), 1.0f);
 		pRect->corners[2] = XMFLOAT4((float)(m_vecPos.x + x * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.y + top    * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.z + right * m_blockSize + m_blockSize / 2.0f), 1.0f);
-		pRect->normal = VEC_NORMAL_LEFT;
+		pRect->normalIndex = VERT_NORMAL_LEFT_INDEX;
 	}
 	else
 	{
@@ -475,7 +632,7 @@ void Chunk::MergeYZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 		pRect->corners[1] = XMFLOAT4((float)(m_vecPos.x + x * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.y + bottom * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.z + left  * m_blockSize - m_blockSize / 2.0f), 1.0f);
 		pRect->corners[2] = XMFLOAT4((float)(m_vecPos.x + x * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.y + top    * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.z + left  * m_blockSize - m_blockSize / 2.0f), 1.0f);
 		pRect->corners[3] = XMFLOAT4((float)(m_vecPos.x + x * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.y + top    * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.z + right * m_blockSize + m_blockSize / 2.0f), 1.0f);
-		pRect->normal = VEC_NORMAL_RIGHT;
+		pRect->normalIndex = VERT_NORMAL_RIGHT_INDEX;
 	}
 
 	// build tex coords
@@ -496,7 +653,9 @@ void Chunk::MergeXZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 				break;
 			}
 
+			EnterCriticalSection(&m_criticalSection);
 			pBlockInfo[_3dto1d(ix, y, z)].info |= (2 * face);
+			LeaveCriticalSection(&m_criticalSection);
 		}
 	}
 
@@ -513,7 +672,9 @@ void Chunk::MergeXZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 				break;
 			}
 
+			EnterCriticalSection(&m_criticalSection);
 			pBlockInfo[_3dto1d(ix, y, z)].info |= (2 * face);
+			LeaveCriticalSection(&m_criticalSection);
 		}
 	}
 
@@ -540,8 +701,10 @@ void Chunk::MergeXZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 				break;
 			}
 
+			EnterCriticalSection(&m_criticalSection);
 			for (unsigned __int8 ix = left; ix <= right; ix++)
 				pBlockInfo[_3dto1d(ix, y, iz)].info |= (2 * face);
+			LeaveCriticalSection(&m_criticalSection);
 		}
 	}
 
@@ -568,8 +731,10 @@ void Chunk::MergeXZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 				break;
 			}
 
+			EnterCriticalSection(&m_criticalSection);
 			for (unsigned __int8 ix = left; ix <= right; ix++)
 				pBlockInfo[_3dto1d(ix, y, iz)].info |= (2 * face);
+			LeaveCriticalSection(&m_criticalSection);
 		}
 	}
 
@@ -580,7 +745,7 @@ void Chunk::MergeXZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 		pRect->corners[2] = XMFLOAT4((float)(m_vecPos.x + left  * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.y + y * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.z + bottom * m_blockSize - m_blockSize / 2.0f), 1.0f);
 		pRect->corners[1] = XMFLOAT4((float)(m_vecPos.x + left  * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.y + y * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.z + top    * m_blockSize + m_blockSize / 2.0f), 1.0f);
 		pRect->corners[0] = XMFLOAT4((float)(m_vecPos.x + right * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.y + y * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.z + top    * m_blockSize + m_blockSize / 2.0f), 1.0f);
-		pRect->normal = VEC_NORMAL_DOWN;
+		pRect->normalIndex = VERT_NORMAL_DOWN_INDEX;
 	}
 	else
 	{
@@ -588,7 +753,7 @@ void Chunk::MergeXZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, un
 		pRect->corners[1] = XMFLOAT4((float)(m_vecPos.x + left  * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.y + y * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.z + bottom * m_blockSize - m_blockSize / 2.0f), 1.0f);
 		pRect->corners[2] = XMFLOAT4((float)(m_vecPos.x + left  * m_blockSize - m_blockSize / 2.0f), (float)(m_vecPos.y + y * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.z + top    * m_blockSize + m_blockSize / 2.0f), 1.0f);
 		pRect->corners[3] = XMFLOAT4((float)(m_vecPos.x + right * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.y + y * m_blockSize + m_blockSize / 2.0f), (float)(m_vecPos.z + top    * m_blockSize + m_blockSize / 2.0f), 1.0f);
-		pRect->normal = VEC_NORMAL_UP;
+		pRect->normalIndex = VERT_NORMAL_UP_INDEX;
 	}
 
 	// build tex coords
@@ -598,6 +763,8 @@ void Chunk::SetTextureCoordinates( unsigned __int8 x, unsigned __int8 y, unsigne
 {
 	// if group is 0 -> tiling
 	XMFLOAT4 texCoords;
+	
+	EnterCriticalSection(&m_criticalSection);
 	if (m_pBlocks[_3dto1d(x, y, z)].Group() == 0)
 	{
 		texCoords = type.GetRectangleTexCoords(width, height);
@@ -606,6 +773,7 @@ void Chunk::SetTextureCoordinates( unsigned __int8 x, unsigned __int8 y, unsigne
 	{
 		texCoords = type.GetRectangleTexCoords(1, 1);
 	}
+	LeaveCriticalSection(&m_criticalSection);
 
 	pRect->texCoords[0] = XMFLOAT2(texCoords.z, texCoords.w);
 	pRect->texCoords[1] = XMFLOAT2(texCoords.x, texCoords.w);
@@ -613,8 +781,20 @@ void Chunk::SetTextureCoordinates( unsigned __int8 x, unsigned __int8 y, unsigne
 	pRect->texCoords[3] = XMFLOAT2(texCoords.z, texCoords.y);
 }
 
+void Chunk::Serialize( FILE* pFile )
+{
+	EnterCriticalSection(&m_criticalSection);
+	fwrite(m_pBlocks, sizeof(Block), m_size * m_size * m_size, pFile);
+	LeaveCriticalSection(&m_criticalSection);
+}
+bool Chunk::Deserialize( FILE* pFile )
+{
+	EnterCriticalSection(&m_criticalSection);
+	fread(m_pBlocks, sizeof(Block), m_size * m_size * m_size, pFile);
+	LeaveCriticalSection(&m_criticalSection);
 
-
+	return true;
+}
 
 
 

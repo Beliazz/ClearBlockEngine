@@ -2,7 +2,7 @@
 // ClearBlockEngine.pch ist der vorkompilierte Header.
 // stdafx.obj enthält die vorkompilierten Typinformationen.
 
-#include "stdafx.h"
+#include "cbe.h"
 
-// TODO: Auf zusätzliche Header verweisen, die in STDAFX.H
+// TODO: Auf zusätzliche Header verweisen, die in cbe.h
 // und nicht in dieser Datei erforderlich sind.

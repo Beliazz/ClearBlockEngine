@@ -1,6 +1,6 @@
 #pragma once
 
-#include "stdafx.h"
+#include "cbe.h"
 #include "BlockType.h"
 #include <cmath>
 #include <list>

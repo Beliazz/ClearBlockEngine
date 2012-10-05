@@ -1,11 +1,12 @@
 #pragma once
 
-#include "stdafx.h"
+#include "cbe.h"
 #include <cmath>
 
 namespace cbe
 {
 
+#pragma pack(push, 1)
 struct PackedBlockType
 {
 	XMFLOAT2	texCoords;
@@ -13,6 +14,7 @@ struct PackedBlockType
 	int			atlasIndex;
 	XMFLOAT4	color;
 };
+#pragma pack(pop)
 
 class CBE_API BlockType
 {

@@ -31,7 +31,7 @@ ClearBlockEngine.cpp
 /////////////////////////////////////////////////////////////////////////////
 Andere Standarddateien:
 
-StdAfx.h, StdAfx.cpp
+cbe.h, StdAfx.cpp
     Diese Dateien werden verwendet, um eine vorkompilierte Headerdatei
     (PCH-Datei) mit dem Namen "ClearBlockEngine.pch und eine 
     vorkompilierte Typendatei mit dem Namen "StdAfx.obj" zu erstellen.

@@ -1,38 +1,54 @@
 #pragma once
 
-#include "stdafx.h"
+#include "cbe.h"
 #include "ChunkManager.h"
 #include "BlockTypeManager.h"
 #include "Block.h"
 
-namespace cbe
-{
+namespace cbe {
 
-struct VertexNormalTextureColor
+#pragma pack(push, 1) 
+struct BlockVertex
 {
 	XMFLOAT4 pos;
-	XMFLOAT4 normal;
-	XMFLOAT4 color;
-
 	XMFLOAT2 texCoord;
-	XMFLOAT2 baseTexCoord;
-	XMFLOAT2 relTexSize;
-
-	int	typeIndex;
+	int	indices[2];
 };
+#pragma pack(pop)
 
-#define VEC_NORMAL_FRONT	XMFLOAT4( 0.0f, 0.0f,-1.0f, 0.0f)
-#define VEC_NORMAL_BACK		XMFLOAT4( 0.0f, 0.0f, 1.0f, 0.0f)
-#define VEC_NORMAL_RIGHT	XMFLOAT4( 1.0f, 0.0f, 0.0f, 0.0f)
-#define VEC_NORMAL_LEFT		XMFLOAT4(-1.0f, 0.0f, 0.0f, 0.0f)
-#define VEC_NORMAL_UP		XMFLOAT4( 0.0f, 1.0f, 0.0f, 0.0f)
-#define VEC_NORMAL_DOWN		XMFLOAT4( 0.0f,-1.0f, 0.0f, 0.0f)
+#define VERT_INDEX_TYPE 0
+#define VERT_INDEX_NORMAL 1
+
+#define VERT_NORMAL_FRONT	XMFLOAT4( 0.0f, 0.0f,-1.0f, 0.0f)
+#define VERT_NORMAL_FRONT_INDEX 0
+
+#define VERT_NORMAL_BACK		XMFLOAT4( 0.0f, 0.0f, 1.0f, 0.0f)
+#define VERT_NORMAL_BACK_INDEX 1
+
+#define VERT_NORMAL_RIGHT	XMFLOAT4( 1.0f, 0.0f, 0.0f, 0.0f)
+#define VERT_NORMAL_RIGHT_INDEX 2
+
+#define VERT_NORMAL_LEFT		XMFLOAT4(-1.0f, 0.0f, 0.0f, 0.0f)
+#define VERT_NORMAL_LEFT_INDEX 3
+
+#define VERT_NORMAL_UP		XMFLOAT4( 0.0f, 1.0f, 0.0f, 0.0f)
+#define VERT_NORMAL_UP_INDEX 4
+
+#define VERT_NORMAL_DOWN		XMFLOAT4( 0.0f,-1.0f, 0.0f, 0.0f)
+#define VERT_NORMAL_DOWN_INDEX 5
 
 class ChunkManager;
 class CBE_API Chunk
 {
 private:
 	XMFLOAT3	m_vecPos;
+	int m_ix;
+	int m_iy;
+	int m_iz;
+
+	bool m_upToDate;
+
+	ChunkManager* m_pManager;
 
 	Block* m_pBlocks;
 	unsigned __int8 m_size;
@@ -43,12 +59,19 @@ private:
 	cgl::PD3D11IndexBuffer		m_pIndexBuffer;
 
 	// data generation
+	std::vector<BlockVertex> m_pendingVertices;
+	std::vector<DWORD>		 m_pendingIndices;
 	UINT m_numVertices;
-	UINT m_numindices;
+	UINT m_numIndices;
 	UINT m_numTris;
 	UINT m_numActiveBlocks;
 	UINT m_numBlocksVisible;
 
+	// thread safety
+	HANDLE m_thread;
+	CRITICAL_SECTION m_criticalSection;
+	bool m_building;
+	
 	struct BLOCK_INFO
 	{
 		unsigned __int16 info;	
@@ -78,6 +101,7 @@ private:
 
 	#define BLOCK_FACE_COUNT			BLOCK_FACE_VISIBLE_TOP
 
+	#pragma pack (push, 1)
 	struct RECTANGLE
 	{
 		
@@ -88,9 +112,10 @@ private:
 		XMFLOAT4 corners[4];
 		XMFLOAT2 texCoords[4];
 
-		XMFLOAT4 normal;
-		XMFLOAT4 color;
+		int normalIndex;
+		char unused[4];
 	};
+	#pragma pack(pop)
 	
 	inline UINT _3dto1d(unsigned __int8 x, unsigned __int8 y, unsigned __int8 z) { return z + y * m_size + x * m_size * m_size; }
 
@@ -111,18 +136,24 @@ private:
 	void MergeXZ( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, unsigned __int16 face, unsigned __int16 group, BlockType& type, RECTANGLE* pRect, BLOCK_INFO* pBlockInfo );
 
 	void SetTextureCoordinates( unsigned __int8 x, unsigned __int8 y, unsigned __int8 z, unsigned __int8 width, unsigned __int8 height, BlockType&, RECTANGLE* pRect );
+		
 
 public:
-	Chunk(XMFLOAT3 pos, unsigned __int8 chunkSize, float blockSize, ChunkManager* pMgr);
+	Chunk(ChunkManager* pManager, int ix, int iy, int iz,XMFLOAT3 pos, unsigned __int8 chunkSize, float blockSize, ChunkManager* pMgr);
 	~Chunk(void);
 
 	bool Init();
+	bool Update();
 	void Render();
+	void RenderBatched(UINT* pOffset);
 	bool Build(ChunkManager* pMgr);
+	bool BuildIt(ChunkManager* pMgr);
 	
 	bool GetBlockState(int x, int y, int z);
-	void SetBlockState(int x, int y, int z, bool state);
-	void SetBlockState(int index, bool state);
+	bool GetBlockState(int index);
+
+	void SetBlockState(int x, int y, int z, BOOL state);
+	void SetBlockState(int index, BOOL state);
 
 	unsigned __int16 GetBlockType(int x, int y, int z);
 	void SetBlockType(int x, int y, int z,  unsigned __int16 type);
@@ -131,9 +162,13 @@ public:
 
 	inline UINT ActiveBlocks()	{ return m_numActiveBlocks; }
 	inline UINT VisibleBlocks() { return m_numBlocksVisible; }
-	inline UINT VertexCount()	{ return m_pVertexBuffer->GetDataSize() / m_pVertexBuffer->GetStride()/*m_numVertices*/; }
-	inline UINT IndexCount()	{ return m_numindices; }
+	inline UINT VertexCount()	{ return m_numVertices; }
+	inline UINT IndexCount()	{ return m_numIndices; }
 	inline UINT TriangleCount() { return m_numTris; }
+	inline cgl::PD3D11VertexBuffer& GetVertexBuffer() { return m_pVertexBuffer; }
+
+	void Serialize(FILE* pFile);
+	bool Deserialize(FILE* pFile);
 };
 
 }
