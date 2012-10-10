@@ -159,6 +159,7 @@ public:
 	void SetBlockType(int x, int y, int z,  unsigned __int16 type);
 	void SetBlockType(int index, unsigned __int16 type);
 	void SetBlockGroup(int index, BYTE group);
+	void SetChunkChanged(bool changed);
 
 	inline UINT ActiveBlocks()	{ return m_numActiveBlocks; }
 	inline UINT VisibleBlocks() { return m_numBlocksVisible; }
@@ -166,6 +167,10 @@ public:
 	inline UINT IndexCount()	{ return m_numIndices; }
 	inline UINT TriangleCount() { return m_numTris; }
 	inline cgl::PD3D11VertexBuffer& GetVertexBuffer() { return m_pVertexBuffer; }
+
+	inline UINT GetChunkIndexX() { return m_ix; }
+	inline UINT GetChunkIndexY() { return m_iy; }
+	inline UINT GetChunkIndexZ() { return m_iz; }
 
 	void Serialize(FILE* pFile);
 	bool Deserialize(FILE* pFile);

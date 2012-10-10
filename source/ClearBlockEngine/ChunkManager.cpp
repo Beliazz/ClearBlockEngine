@@ -1,4 +1,4 @@
-#include "ChunkManager.h"
+#include "cbe.h"
 
 using namespace cbe;
 
@@ -50,6 +50,7 @@ bool ChunkManager::Init(int widht, int height, int depth, int chunkSize)
 		m_ppChunks[i] = NULL;
 
 	m_chunkSize = chunkSize;
+	m_absoluteChunkSize = 20.0f;
 
 	m_pBlockTypes = cgl::CD3D11EffectVariableFromSemantic::Create(m_pEffect, "BLOCKTYPES");
 	if (!CGL_RESTORE(m_pBlockTypes))
@@ -81,6 +82,11 @@ bool ChunkManager::Init(int widht, int height, int depth, int chunkSize)
 	m_pNormals->get()->AsVector()->SetFloatVectorArray((float*)normals, 0, 6);
 	m_upToDate = false;
 
+	m_tsChunksToChangeIndices.set(new std::list<int>());
+	m_tsChunksToUpdateIndices.set(new std::vector<int>());
+	m_tsUpdateJobs.set(new std::vector<std::vector<UpdateJob>>());
+	m_tsUpdateJobs->resize(m_width*m_height*m_width);
+
 	return true;
 }
 void ChunkManager::StartAsyncUpdating()
@@ -111,87 +117,39 @@ void ChunkManager::Exit()
 	DeleteCriticalSection(&m_criticalSection);
 }
 
-void ChunkManager::_setBlockState( int x, int y, int z, BOOL state )
+void ChunkManager::_setBlockState(int* chunkIndices, int* blockIndices, BOOL state )
 {
 	EnterCriticalSection(&m_criticalSection);
 
-	int chunkIndex[4];
-	chunkIndex[3] = -1;
-
-	int blockIndex[4];
-	blockIndex[3] = -1;
-	
-	TransformCoords(x, y, z, chunkIndex, blockIndex);
-	if (chunkIndex[3] == -1 || blockIndex[3] == -1)
-	{
-		LeaveCriticalSection(&m_criticalSection);
-		return;
-	}
-
-	m_ppChunks[chunkIndex[3]]->SetBlockState(blockIndex[3], state);
-
-	m_upToDate = false;
-	AddChunk(chunkIndex[3]);
-	//ChunkChanged(chunkIndex, blockIndex);
+	CheckChunk(chunkIndices);
+	m_ppChunks[chunkIndices[3]]->SetBlockState(blockIndices[3], state);
+	ChunkChanged(chunkIndices, blockIndices);
 
 	LeaveCriticalSection(&m_criticalSection);
 }
-void ChunkManager::_setBlockType( int x, int y, int z, USHORT type )
+void ChunkManager::_setBlockType( int* chunkIndices, int* blockIndices, USHORT type )
 {
 	EnterCriticalSection(&m_criticalSection);
 
-	int chunkIndex[4];
-	chunkIndex[3] = -1;
-
-	int blockIndex[4];
-	blockIndex[3] = -1;
-
-	TransformCoords(x, y, z, chunkIndex, blockIndex);
-	if (chunkIndex[3] == -1 || blockIndex[3] == -1)
-	{
-		LeaveCriticalSection(&m_criticalSection);
-		return;
-	}
-
-	m_ppChunks[chunkIndex[3]]->SetBlockType(blockIndex[3], type);
-
-	m_upToDate = false;
-	AddChunk(chunkIndex[3]);
-	//ChunkChanged(chunkIndex, blockIndex);
+	CheckChunk(chunkIndices);
+	m_ppChunks[chunkIndices[3]]->SetBlockType(blockIndices[3], type);
+	ChunkChanged(chunkIndices, blockIndices);
 
 	LeaveCriticalSection(&m_criticalSection);
 }
-void ChunkManager::_setBlockGroup( int x, int y, int z, BYTE group )
+void ChunkManager::_setBlockGroup(int* chunkIndices, int* blockIndices, BYTE group )
 {
 	EnterCriticalSection(&m_criticalSection);
 
-	int chunkIndex[4];
-	chunkIndex[3] = -1;
-
-	int blockIndex[4];
-	blockIndex[3] = -1;
-
-	TransformCoords(x, y, z, chunkIndex, blockIndex);
-
-	if (chunkIndex[3] == -1 || blockIndex[3] == -1)
-	{
-		LeaveCriticalSection(&m_criticalSection);
-		return;
-	}
-
-	m_ppChunks[chunkIndex[3]]->SetBlockGroup(blockIndex[3], group);
-
-	m_upToDate = false;
-	AddChunk(chunkIndex[3]);
-	//ChunkChanged(chunkIndex, blockIndex);
+	CheckChunk(chunkIndices);
+	m_ppChunks[chunkIndices[3]]->SetBlockGroup(blockIndices[3], group);
+	ChunkChanged(chunkIndices, blockIndices);
 
 	LeaveCriticalSection(&m_criticalSection);
 }
 
 void ChunkManager::Render()
 {
-	EnterCriticalSection(&m_criticalSection);
-
 	m_pInputLayout->Bind();
 
 	for (UINT pass = 0; pass < m_techniques[0].passes.size(); pass++)
@@ -204,8 +162,6 @@ void ChunkManager::Render()
 				pChunk->Render();
 		}
 	}
-
-	LeaveCriticalSection(&m_criticalSection);
 }
 void ChunkManager::RenderBatched()
 {
@@ -306,73 +262,70 @@ bool ChunkManager::GetBlockState( int x, int y, int z )
 {
 	EnterCriticalSection(&m_criticalSection);
 
-	int chunkIndex[4];
-	chunkIndex[3] = -1;
-
-	int blockIndex[4];
-	blockIndex[3] = -1;
-
-	TransformCoords(x, y, z, chunkIndex, blockIndex, false);
-
-	if (chunkIndex[3] == -1 || blockIndex[3] == -1)
-	{
-		LeaveCriticalSection(&m_criticalSection);
-		return false;
-	}
-
+	int chunkIndices[4];
+	int blockIndices[4];
 	bool state = false;
-	if(m_ppChunks[chunkIndex[3]])
-	{
-		state = m_ppChunks[chunkIndex[3]]->GetBlockState(blockIndex[3]);
-	}
+
+	if (TransformCoords(x, y, z, chunkIndices, blockIndices))
+		state = m_ppChunks[chunkIndices[3]]->GetBlockState(blockIndices[3]);
 
 	LeaveCriticalSection(&m_criticalSection);
 
 	return state;
 }
-void ChunkManager::TransformCoords( int x, int y, int z, int* pChunkIndex, int* pBlockIndex, bool build)
+bool ChunkManager::TransformCoords( int x, int y, int z, int* pChunkIndex, int* pBlockIndex)
 {
+	EnterCriticalSection(&m_criticalSection);
+
+	int width = m_width;
+	int height = m_height;
+	int depth = m_depth;
+	int chunkSize = m_chunkSize;
+
+	LeaveCriticalSection(&m_criticalSection);
+
 	if (x < 0 || y < 0 || z < 0 ||
-		x >= m_chunkSize * m_width || 
-		y >= m_chunkSize * m_height ||
-		z >= m_chunkSize * m_depth)
+		x >= chunkSize * width || 
+		y >= chunkSize * height ||
+		z >= chunkSize * depth)
 	{
-		return;
+		return false;
 	}
 
-	double tmp = (double)x / m_chunkSize;
+	double tmp = (double)x / chunkSize;
 	pChunkIndex[0] = (int)(tmp + 0.0000000000005);
-	pBlockIndex[0] = x - pChunkIndex[0] * m_chunkSize;
+	pBlockIndex[0] = x - pChunkIndex[0] * chunkSize;
 
-	tmp  = (double)y / m_chunkSize;
+	tmp  = (double)y / chunkSize;
 	pChunkIndex[1] = (int)(tmp + 0.0000000000005);
-	pBlockIndex[1] = y - pChunkIndex[1] * m_chunkSize;
+	pBlockIndex[1] = y - pChunkIndex[1] * chunkSize;
 
-	tmp  = (double)z / m_chunkSize;
+	tmp  = (double)z / chunkSize;
 	pChunkIndex[2] = (int)(tmp + 0.0000000000005);
-	pBlockIndex[2] = z - pChunkIndex[2] * m_chunkSize; 
+	pBlockIndex[2] = z - pChunkIndex[2] * chunkSize; 
 
-	pChunkIndex[3] = _3dto1d(pChunkIndex[0], pChunkIndex[1], pChunkIndex[2], m_width, m_height);
-	pBlockIndex[3] = _3dto1d(pBlockIndex[0], pBlockIndex[1], pBlockIndex[2], m_chunkSize, m_chunkSize);
+	pChunkIndex[3] = _3dto1d(pChunkIndex[0], pChunkIndex[1], pChunkIndex[2], width, height);
+	pBlockIndex[3] = _3dto1d(pBlockIndex[0], pBlockIndex[1], pBlockIndex[2], chunkSize, chunkSize);
 
-	// create/init chunk if it doesn't exist
-	// 
-	// not the optimal place to do this but
-	// much simpler than returning the chunk coordinates
-	// ix, iy, iz
-	float absoluteChunkSize = 20.0f;
-	if(!m_ppChunks[pChunkIndex[3]] && build)
-	{
-		m_ppChunks[pChunkIndex[3]] = new Chunk(this, pChunkIndex[0], pChunkIndex[1], pChunkIndex[2], XMFLOAT3((float)(pChunkIndex[0] * (absoluteChunkSize)),
-																											  (float)(pChunkIndex[1] * (absoluteChunkSize)), 
-																											  (float)(pChunkIndex[2] * (absoluteChunkSize))), m_chunkSize, absoluteChunkSize / m_chunkSize, this);
-		m_ppChunks[pChunkIndex[3]]->Init();
-	}
+	// 	// create/init chunk if it doesn't exist
+// 	// 
+// 	// not the optimal place to do this but
+// 	// much simpler than returning the chunk coordinates
+// 	// ix, iy, iz
+// 	float absoluteChunkSize = 20.0f;
+// 	if(!m_ppChunks[pChunkIndex[3]] && build)
+// 	{
+// 		m_ppChunks[pChunkIndex[3]] = new Chunk(this, pChunkIndex[0], pChunkIndex[1], pChunkIndex[2], XMFLOAT3((float)(pChunkIndex[0] * (absoluteChunkSize)),
+// 																											  (float)(pChunkIndex[1] * (absoluteChunkSize)), 
+// 																											  (float)(pChunkIndex[2] * (absoluteChunkSize))), m_chunkSize, absoluteChunkSize / m_chunkSize, this);
+// 		m_ppChunks[pChunkIndex[3]]->Init();
+// 	}
+
+	return true;
 }
 
 void ChunkManager::Update()
 {
-
 	SetEvent(m_startEvent);
 
 	if (m_pTypeMgr->Update())
@@ -383,12 +336,18 @@ void ChunkManager::Update()
 
 	m_pMatWorld->get()->AsMatrix()->SetMatrix((float*)&m_matWorld);
 
-
-	Chunk* pChunk = GetNextChunkToProcess(false);
-	if (pChunk)
+	UpdateNextChunk();
+}
+DWORD WINAPI ChunkManager::UpdateAsync( LPVOID data )
+{
+	ChunkManager* pManager = (ChunkManager*)data;
+	while (pManager->IsAsyncProccessing())
 	{
-		GetNextChunkToProcess(pChunk->Update());
+		pManager->ProcessPendingJobs();
+		pManager->BuildNextChunk();
 	}
+
+	return 0;
 }
 
 int ChunkManager::GetActiveBlockCount()
@@ -515,7 +474,7 @@ bool ChunkManager::Deserialize( std::string fileName )
 					EnterCriticalSection(&m_criticalSection);
 					CreateChunk(x, y, z);
 					m_ppChunks[_3dto1d(x, y, z, m_height, m_width)]->Deserialize(pFile);
-					m_chunksToChangeIndices.push_back(_3dto1d(x, y, z, m_width, m_height));
+					m_tsChunksToChangeIndices->push_back(_3dto1d(x, y, z, m_width, m_height));
 					LeaveCriticalSection(&m_criticalSection);
 				}
 
@@ -536,45 +495,6 @@ void ChunkManager::CreateChunk( int ix, int iy, int iz )
 																							  (float)(iz * (m_absoluteChunkSize))), m_chunkSize, m_absoluteChunkSize / m_chunkSize, this);
 	m_ppChunks[_3dto1d(ix, iy, iz, m_width, m_height)]->Init();
 }
-Chunk* ChunkManager::GetNextChunkToProcess( bool del )
-{
-	EnterCriticalSection(&m_criticalSection);
-
-	Chunk* pChunk = NULL;
-	if (!m_chunksToChangeIndices.empty())
-	{
-		pChunk = GetChunk(*m_chunksToChangeIndices.begin());
-		if (del || pChunk == NULL)
-		{
-			m_chunksToChangeIndices.remove(*m_chunksToChangeIndices.begin());
-		}
-	}
-
-	LeaveCriticalSection(&m_criticalSection);
-
-	return pChunk;
-}
-
-DWORD WINAPI ChunkManager::UpdateAsync( LPVOID data )
-{
-	ChunkManager* pManager = (ChunkManager*)data;
-	while (pManager->IsAsyncProccessing())
-	{
-		pManager->ProcessPendingJobs();
-
-		Chunk* pChunk = pManager->GetNextChunkToProcess(false);
-		if (!pChunk)
-		{
-			WaitForSingleObject(pManager->GetStartEvent(), INFINITE);
-		}
-		else
-		{
-			pChunk->Build(pManager);
-		}
-	}
-
-	return 0;
-}
 
 HANDLE ChunkManager::GetStartEvent()
 {
@@ -593,36 +513,6 @@ BlockTypeManager* ChunkManager::TypeManager()
 	LeaveCriticalSection(&m_criticalSection);
 
 	return pManager;
-}
-
-void ChunkManager::AddChunk( int index , bool highPriority )
-{
-	EnterCriticalSection(&m_criticalSection);
-
-	bool found = false;
-	for (auto it = m_chunksToChangeIndices.begin(); it != m_chunksToChangeIndices.end(); it++)
-	{
-		if (*it == index)
-		{
-			found = true;
-			break;
-		}
-	}
-
-	if (!found)
-	{
-		if (highPriority)
-		{
-			m_chunksToChangeIndices.push_front(index);
-		}
-		else
-		{
-			m_chunksToChangeIndices.push_back(index);
-		}
-		
-	}
-
-	LeaveCriticalSection(&m_criticalSection);
 }
 
 void ChunkManager::SetWorldMatrix( float* pMat )
@@ -648,18 +538,21 @@ void ChunkManager::SetWorldMatrix( XMFLOAT4X4 mat )
 
 void ChunkManager::ChunkChanged( int* pChunkIndices, int* pBlockIndices )
 {
+	AddChangedChunk(pChunkIndices[3]);
+
+	/*
 	if (pBlockIndices[0] < 0)
 	{
 		if (pChunkIndices[0] - 1 >= 0)
 		{
-			AddChunk(_3dto1d(pChunkIndices[0] - 1, pChunkIndices[1], pChunkIndices[2], m_width, m_height), false);
+			AddChangedChunk(_3dto1d(pChunkIndices[0] - 1, pChunkIndices[1], pChunkIndices[2], m_width, m_height), false);
 		}
 	}
 	else if (pBlockIndices[0] >= m_chunkSize)
 	{
 		if (pChunkIndices[0] + 1 < m_chunkSize)
 		{
-			AddChunk(_3dto1d(pChunkIndices[0] + 1, pChunkIndices[1], pChunkIndices[2], m_width, m_height), false);
+			AddChangedChunk(_3dto1d(pChunkIndices[0] + 1, pChunkIndices[1], pChunkIndices[2], m_width, m_height), false);
 		}
 	}
 
@@ -667,78 +560,191 @@ void ChunkManager::ChunkChanged( int* pChunkIndices, int* pBlockIndices )
 	{
 		if (pChunkIndices[1] - 1 >= 0)
 		{
-			AddChunk(_3dto1d(pChunkIndices[0], pChunkIndices[1] - 1, pChunkIndices[2], m_width, m_height), false);
+			AddChangedChunk(_3dto1d(pChunkIndices[0], pChunkIndices[1] - 1, pChunkIndices[2], m_width, m_height), false);
 		}
 	}
 	else if (pBlockIndices[1] >= m_chunkSize)
 	{
 		if (pChunkIndices[1] + 1 < m_chunkSize)
 		{
-			AddChunk(_3dto1d(pChunkIndices[0], pChunkIndices[1] + 1, pChunkIndices[2], m_width, m_height), false);
+			AddChangedChunk(_3dto1d(pChunkIndices[0], pChunkIndices[1] + 1, pChunkIndices[2], m_width, m_height), false);
 		}
 	}
 
 	if (pBlockIndices[2] < 0)
 	{
-		if (pChunkIndices[2] + 1 >= 0)
+		if (pChunkIndices[2] - 1 >= 0)
 		{
-			AddChunk(_3dto1d(pChunkIndices[0], pChunkIndices[1], pChunkIndices[2] - 1, m_width, m_height), false);
+			AddChangedChunk(_3dto1d(pChunkIndices[0], pChunkIndices[1], pChunkIndices[2] - 1, m_width, m_height), false);
 		}
 	}
 	else if (pBlockIndices[2] >= m_chunkSize)
 	{
 		if (pChunkIndices[2] + 1 < m_chunkSize)
 		{
-			AddChunk(_3dto1d(pChunkIndices[0], pChunkIndices[1], pChunkIndices[2] + 1, m_width, m_height), false);
+			AddChangedChunk(_3dto1d(pChunkIndices[0], pChunkIndices[1], pChunkIndices[2] + 1, m_width, m_height), false);
 		}
 	}
+	*/
+
+	m_upToDate = false;
 }
 
 void ChunkManager::SetBlockState( int x, int y, int z, BOOL state )
 {
-	EnterCriticalSection(&m_criticalSection);
-	m_updateJobs.push_back(UpdateJobs(x, y, z, JOB_TYPE_STATE, state));
-	LeaveCriticalSection(&m_criticalSection);
+	UpdateJob job(JOB_TYPE_STATE, state);
+	if (TransformCoords(x, y, z, job.chunkIndices, job.blockIndices))
+		m_tsUpdateJobs->at(job.chunkIndices[3]).push_back(job);
 }
 void ChunkManager::SetBlockType( int x, int y, int z, BlockType& type )
 {
-	EnterCriticalSection(&m_criticalSection);
-	m_updateJobs.push_back(UpdateJobs(x, y, z, JOB_TYPE_BLOCKTYPE, type.Id()));
-	LeaveCriticalSection(&m_criticalSection);
+	UpdateJob job(JOB_TYPE_BLOCKTYPE, type.Id());
+	if (TransformCoords(x, y, z, job.chunkIndices, job.blockIndices))
+		m_tsUpdateJobs->at(job.chunkIndices[3]).push_back(job);
 }
 void ChunkManager::SetBlockGroup( int x, int y, int z, BYTE group )
 {
-	EnterCriticalSection(&m_criticalSection);
-	m_updateJobs.push_back(UpdateJobs(x, y, z, JOB_TYPE_GROUP, group));
-	LeaveCriticalSection(&m_criticalSection);
+	UpdateJob job(JOB_TYPE_GROUP, group);
+	if (TransformCoords(x, y, z, job.chunkIndices, job.blockIndices))
+		m_tsUpdateJobs->at(job.chunkIndices[3]).push_back(job);
 }
 
-void ChunkManager::ProcessPendingJobs()
+void cbe::ChunkManager::SetChunkChanged( int x, int y, int z, bool changed )
 {
-	EnterCriticalSection(&m_criticalSection);
-	int count = m_updateJobs.size();
-	if (count == 0)
-	{
-		LeaveCriticalSection(&m_criticalSection);
-		return;
-	}
+	double tmp = (double)x / m_chunkSize;
+	int ix = (int)(tmp + 0.0000000000005);
 
-	UpdateJobs* pJobs = (UpdateJobs*)malloc(count * sizeof(UpdateJobs));
-	memcpy(pJobs, m_updateJobs.data(), count * sizeof(UpdateJobs));
-	m_updateJobs.clear();
-	LeaveCriticalSection(&m_criticalSection);
+	tmp  = (double)y / m_chunkSize;
+	int iy = (int)(tmp + 0.0000000000005);
 
-	for (int i = 0; i < count; i++)
+	tmp  = (double)z / m_chunkSize;
+	int iz = (int)(tmp + 0.0000000000005);
+
+	m_ppChunks[_3dto1d(ix, iy, iz, m_width, m_height)]->SetChunkChanged(true);
+
+}
+
+void cbe::ChunkManager::AddBuiltChunk( int index )
+{
+	auto sec = m_tsChunksToUpdateIndices.blockSecurity();
+
+	bool found = false;
+	for (auto it = m_tsChunksToUpdateIndices->begin(); it != m_tsChunksToUpdateIndices->end(); it++)
 	{
-		switch(pJobs[i].type)
+		if (*it == index)
 		{
-		case JOB_TYPE_STATE:		_setBlockState(pJobs[i].indices[0], pJobs[i].indices[1], pJobs[i].indices[2], pJobs->val); break;
-		case JOB_TYPE_GROUP:		_setBlockGroup(pJobs[i].indices[0], pJobs[i].indices[1], pJobs[i].indices[2], pJobs->val); break;
-		case JOB_TYPE_BLOCKTYPE:	_setBlockType(pJobs[i].indices[0], pJobs[i].indices[1], pJobs[i].indices[2], pJobs->val); break;
+			found = true;
+			break;
 		}
 	}
 
-	SAFE_DELETE(pJobs);
+	if (!found)
+	{
+		m_tsChunksToUpdateIndices->push_back(index);
+	}
+}
+void cbe::ChunkManager::AddChangedChunk( int index , bool highPriority )
+{
+	auto sec = m_tsChunksToChangeIndices.blockSecurity();
+
+	bool found = false;
+	for (auto it = m_tsChunksToChangeIndices->begin(); it != m_tsChunksToChangeIndices->end(); it++)
+	{
+		if (*it == index)
+		{
+			found = true;
+			break;
+		}
+	}
+
+	if (!found)
+	{
+		if (highPriority)
+		{
+			m_tsChunksToChangeIndices->push_front(index);
+		}
+		else
+		{
+			m_tsChunksToChangeIndices->push_back(index);
+		}
+
+	}
 }
 
+void cbe::ChunkManager::ProcessPendingJobs()
+{
+	std::vector<UpdateJob> jobs;
+	int count = 0;
+	{
+		auto sec = m_tsUpdateJobs.blockSecurity();
 
+		for (auto it = m_tsUpdateJobs->begin(); it != m_tsUpdateJobs->end(); it++)
+		{
+			if(!it->empty())
+			{
+				jobs = std::vector<UpdateJob>(it->begin(), it->end());
+				it->clear();
+				break;
+			}
+		}
+	}
+
+	for (auto it2 = jobs.begin(); it2 != jobs.end(); it2++)
+	{
+		UpdateJob currJob = *it2;
+		switch(currJob.type)
+		{
+		case JOB_TYPE_STATE:		_setBlockState(currJob.chunkIndices, currJob.blockIndices, currJob.val); break;
+		case JOB_TYPE_GROUP:		_setBlockGroup(currJob.chunkIndices, currJob.blockIndices, currJob.val); break;
+		case JOB_TYPE_BLOCKTYPE:	_setBlockType( currJob.chunkIndices, currJob.blockIndices, currJob.val); break;
+		}
+	}
+}
+bool cbe::ChunkManager::UpdateNextChunk()
+{
+	auto sec = m_tsChunksToUpdateIndices.blockSecurity();
+
+	bool update = false;
+	if (!m_tsChunksToUpdateIndices->empty())
+	{
+		Chunk* pChunk = m_ppChunks[*m_tsChunksToUpdateIndices->begin()];
+		if (pChunk)
+		{
+			update = pChunk->Update();
+			if (!update)
+			{
+				m_tsChunksToUpdateIndices->push_back(*m_tsChunksToUpdateIndices->begin());
+			}
+		}
+		
+		m_tsChunksToUpdateIndices->erase(m_tsChunksToUpdateIndices->begin());
+	}
+
+	return update;
+}
+void cbe::ChunkManager::BuildNextChunk()
+{
+	if (!m_tsChunksToChangeIndices->empty())
+	{
+		Chunk* pChunk = m_ppChunks[*m_tsChunksToChangeIndices->begin()];
+		if (pChunk)
+		{
+			pChunk->Build(this);	
+			AddBuiltChunk(*m_tsChunksToChangeIndices->begin());
+		}
+		
+		m_tsChunksToChangeIndices->erase(m_tsChunksToChangeIndices->begin());
+	}	
+	else
+	{
+		WaitForSingleObject(GetStartEvent(), INFINITE);
+	}
+}
+
+void cbe::ChunkManager::CheckChunk( int* pIndices )
+{
+	if (!m_ppChunks[pIndices[3]])
+	{
+		CreateChunk(pIndices[0], pIndices[1], pIndices[2]);
+	}
+}

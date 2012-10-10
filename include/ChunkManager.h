@@ -51,47 +51,41 @@ private:
 	};
 
 	#pragma pack(push, 1)
-	struct UpdateJobs
+	struct UpdateJob
 	{
-		int indices[3];
+		int chunkIndices[4];
+		int blockIndices[4];
+
 		JOB_TYPE type;
 		int val;
-		char unused[4];
 
-		UpdateJobs(int _x, int _y, int _z, JOB_TYPE _type, int _val)
+		UpdateJob(JOB_TYPE _type, int _val)
 			: type(_type), val(_val)
-		{
-			indices[0] = _x;
-			indices[1] = _y;
-			indices[2] = _z;
-		}
+		{		}
 	};
 	#pragma pack(pop)
 	
 	CRITICAL_SECTION m_criticalSection;
 	HANDLE m_thread;
 	HANDLE m_startEvent;
-	std::list<int> m_chunksToChangeIndices;
-	std::vector<UpdateJobs> m_updateJobs;
+	ThreadSafe<std::list<int>>						m_tsChunksToChangeIndices;
+	ThreadSafe<std::vector<int>>					m_tsChunksToUpdateIndices;
+	ThreadSafe<std::vector<std::vector<UpdateJob>>>	m_tsUpdateJobs;
 	bool m_processing;
 
 	inline Chunk* GetChunk(int index) { return m_ppChunks[index]; }
 	HANDLE GetStartEvent();
 
-	Chunk* GetNextChunkToProcess(bool del);
+	void BuildNextChunk();
+	bool UpdateNextChunk();
 	static DWORD WINAPI UpdateAsync(LPVOID data);
 	
 	bool IsAsyncProccessing();
 
 	inline int _3dto1d(unsigned __int16 x, unsigned __int16 y, unsigned __int16 z, unsigned __int16 width, unsigned __int16 height) { return z + y * width + x * height * width; }
-	void TransformCoords(int x, int y, int z, int* pChunkIndex,int* pBlockIndex, bool build = true);
+	bool TransformCoords(int x, int y, int z, int* pChunkIndex,int* pBlockIndex);
 	bool CreateChunk(int chunkIndex, int x, int y, int z );
-
-	inline double round( double x, int places )
-	{
-		const double sd = pow(10.0, places);
-		return int(x*sd + 0.5) / sd;
-	}
+	void CheckChunk(int* pIndices);
 
 	#pragma pack (push, 1)
 	struct MapInfo
@@ -103,16 +97,17 @@ private:
 	};
 	#pragma pack (pop)
 
-	void AddChunk(int index, bool highPriority = false);
+	void AddChangedChunk(int index, bool highPriority = false);
+	void AddBuiltChunk(int index);
 	void CreateChunk(int ix, int iy, int iz);
 	void RenderBatched();
 	void ChunkChanged(int* pChunkIndices, int* pBlockIndices);
 	void ProcessPendingJobs();
 
 	// synchronized access
-	void _setBlockState(int x, int y, int z, BOOL state);
-	void _setBlockType(int x, int y, int z, USHORT type);
-	void _setBlockGroup(int x, int y, int z, BYTE group);
+	void _setBlockState(int* chunkIndices, int* blockIndices, BOOL state);
+	void _setBlockType( int* chunkIndices, int* blockIndices, USHORT type);
+	void _setBlockGroup(int* chunkIndices, int* blockIndices, BYTE group);
 
 public:
 	ChunkManager(cgl::PD3D11Effect pEffect);
@@ -129,6 +124,7 @@ public:
 	void SetBlockState(int x, int y, int z, BOOL state);
 	void SetBlockType(int x, int y, int z, BlockType& type);
 	void SetBlockGroup(int x, int y, int z, BYTE group);
+	void SetChunkChanged(int x, int y, int z, bool changed);
 
 	void SetWorldMatrix(float* pMat);
 	void SetWorldMatrix(CXMMATRIX mat);

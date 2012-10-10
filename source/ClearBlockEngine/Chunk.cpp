@@ -1,4 +1,4 @@
-#include "Chunk.h"
+#include "cbe.h"
 
 using namespace cbe;
 
@@ -116,7 +116,7 @@ bool Chunk::Init()
 bool Chunk::Update()
 {
 	EnterCriticalSection(&m_criticalSection);
-	if (!m_building)
+	if (!m_building && m_upToDate)
 	{
 		if (m_numTris != 0)
 		{
@@ -796,8 +796,7 @@ bool Chunk::Deserialize( FILE* pFile )
 	return true;
 }
 
-
-
-
-
-
+void cbe::Chunk::SetChunkChanged( bool changed )
+{
+	m_upToDate = false;
+}

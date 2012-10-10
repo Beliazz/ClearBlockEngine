@@ -35,5 +35,11 @@
 #include <d3dx9.h>
 #pragma comment(lib, "d3dx9.lib")
 
+#include "ThreadSafe.h"
+#include "Block.h"
+#include "BlockType.h"
+#include "BlockTypeManager.h"
+#include "Chunk.h"
+#include "ChunkManager.h"
 
 // TODO: Hier auf zusätzliche Header, die das Programm erfordert, verweisen.
