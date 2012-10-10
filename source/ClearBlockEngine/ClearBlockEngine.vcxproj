@@ -46,6 +46,7 @@
     <LinkIncremental>true</LinkIncremental>
     <IncludePath>$(CGL_HOME)\include;$(DXSDK_DIR)\include;$(DXSDK_DIR)\Samples\C++\Effects11\inc;$(IncludePath)</IncludePath>
     <LibraryPath>$(CGL_HOME)\lib\debug;$(DXSDK_DIR)\lib\x86;$(DXSDK_DIR)\Samples\C++\Effects11\debug;$(LibraryPath)</LibraryPath>
+    <OutDir>$(ProjectDir)$(Configuration)\</OutDir>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <LinkIncremental>false</LinkIncremental>
