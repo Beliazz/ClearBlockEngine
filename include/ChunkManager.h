@@ -68,6 +68,7 @@ private:
 	CRITICAL_SECTION m_criticalSection;
 	HANDLE m_thread;
 	HANDLE m_startEvent;
+	HANDLE m_endEvent;
 	ThreadSafe<std::list<int>>						m_tsChunksToChangeIndices;
 	ThreadSafe<std::vector<int>>					m_tsChunksToUpdateIndices;
 	ThreadSafe<std::vector<std::vector<UpdateJob>>>	m_tsUpdateJobs;
@@ -75,12 +76,14 @@ private:
 
 	inline Chunk* GetChunk(int index) { return m_ppChunks[index]; }
 	HANDLE GetStartEvent();
+	HANDLE GetEndEvent();
 
 	void BuildNextChunk();
 	bool UpdateNextChunk();
 	static DWORD WINAPI UpdateAsync(LPVOID data);
 	
 	bool IsAsyncProccessing();
+	void SetAsyncProccessing(bool processing);
 
 	inline int _3dto1d(unsigned __int16 x, unsigned __int16 y, unsigned __int16 z, unsigned __int16 width, unsigned __int16 height) { return z + y * width + x * height * width; }
 	bool TransformCoords(int x, int y, int z, int* pChunkIndex,int* pBlockIndex);

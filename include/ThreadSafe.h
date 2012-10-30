@@ -10,14 +10,7 @@ private:
 	CRITICAL_SECTION m_cs;
 	std::shared_ptr<T> m_obj;
 
-	void enterSecureMode()
-	{
-		::EnterCriticalSection(&m_cs);
-	}
-	void leaveSecureMode()
-	{
-		::LeaveCriticalSection(&m_cs);
-	}
+
 
 public:
 	class BlockSecurity
@@ -69,6 +62,15 @@ public:
 		this->m_obj = rhs.m_obj;
 
 		return *this;
+	}
+
+	void enterSecureMode()
+	{
+		::EnterCriticalSection(&m_cs);
+	}
+	void leaveSecureMode()
+	{
+		::LeaveCriticalSection(&m_cs);
 	}
 
 	inline BlockSecurity blockSecurity() { return *this; }

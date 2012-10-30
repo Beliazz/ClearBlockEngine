@@ -50,7 +50,7 @@ bool ChunkManager::Init(int widht, int height, int depth, int chunkSize)
 		m_ppChunks[i] = NULL;
 
 	m_chunkSize = chunkSize;
-	m_absoluteChunkSize = 20.0f;
+	m_absoluteChunkSize = 50.0f;
 
 	m_pBlockTypes = cgl::CD3D11EffectVariableFromSemantic::Create(m_pEffect, "BLOCKTYPES");
 	if (!CGL_RESTORE(m_pBlockTypes))
@@ -70,6 +70,7 @@ bool ChunkManager::Init(int widht, int height, int depth, int chunkSize)
 
 	InitializeCriticalSection(&m_criticalSection);
 	m_startEvent = CreateEvent(NULL, false, false, L"update asnyc start event");
+	m_endEvent = CreateEvent(NULL, false, false, L"update asnyc end event");
 
 	XMFLOAT4 normals[6];
 	normals[VERT_NORMAL_FRONT_INDEX] = VERT_NORMAL_FRONT;
@@ -96,12 +97,11 @@ void ChunkManager::StartAsyncUpdating()
 
 void ChunkManager::Exit()
 {
-	TerminateThread(m_thread, 0);
+	SetAsyncProccessing(false);
 	SetEvent(m_startEvent);
+	WaitForSingleObject(GetEndEvent(), INFINITE);
 
-	EnterCriticalSection(&m_criticalSection);
 	m_processing = false;
-
 	if(m_ppChunks)
 	{
 		for (int i = 0; i < m_width * m_height * m_depth; i++)
@@ -111,8 +111,6 @@ void ChunkManager::Exit()
 	}
 
 	SAFE_DELETE(m_pTypeMgr);
-
-	LeaveCriticalSection(&m_criticalSection);
 
 	DeleteCriticalSection(&m_criticalSection);
 }
@@ -347,6 +345,8 @@ DWORD WINAPI ChunkManager::UpdateAsync( LPVOID data )
 		pManager->BuildNextChunk();
 	}
 
+	SetEvent(pManager->GetEndEvent());
+
 	return 0;
 }
 
@@ -407,6 +407,12 @@ bool ChunkManager::IsAsyncProccessing()
 	LeaveCriticalSection(&m_criticalSection); 
 	
 	return processing;
+}
+void cbe::ChunkManager::SetAsyncProccessing(bool processing)
+{
+	EnterCriticalSection(&m_criticalSection); 
+	m_processing = processing ; 
+	LeaveCriticalSection(&m_criticalSection); 
 }
 
 void ChunkManager::Serialize( std::string fileName )
@@ -504,6 +510,15 @@ HANDLE ChunkManager::GetStartEvent()
 	LeaveCriticalSection(&m_criticalSection);
 
 	return startEvent;
+}
+HANDLE cbe::ChunkManager::GetEndEvent()
+{
+	HANDLE endEvent;
+	EnterCriticalSection(&m_criticalSection);
+	endEvent = m_endEvent;
+	LeaveCriticalSection(&m_criticalSection);
+
+	return endEvent;
 }
 
 BlockTypeManager* ChunkManager::TypeManager()
@@ -708,6 +723,7 @@ bool cbe::ChunkManager::UpdateNextChunk()
 	if (!m_tsChunksToUpdateIndices->empty())
 	{
 		Chunk* pChunk = m_ppChunks[*m_tsChunksToUpdateIndices->begin()];
+
 		if (pChunk)
 		{
 			update = pChunk->Update();
@@ -724,6 +740,7 @@ bool cbe::ChunkManager::UpdateNextChunk()
 }
 void cbe::ChunkManager::BuildNextChunk()
 {
+	m_tsChunksToChangeIndices.enterSecureMode();
 	if (!m_tsChunksToChangeIndices->empty())
 	{
 		Chunk* pChunk = m_ppChunks[*m_tsChunksToChangeIndices->begin()];
@@ -734,9 +751,11 @@ void cbe::ChunkManager::BuildNextChunk()
 		}
 		
 		m_tsChunksToChangeIndices->erase(m_tsChunksToChangeIndices->begin());
+		m_tsChunksToChangeIndices.leaveSecureMode();
 	}	
 	else
 	{
+		m_tsChunksToChangeIndices.leaveSecureMode();
 		WaitForSingleObject(GetStartEvent(), INFINITE);
 	}
 }
@@ -748,3 +767,4 @@ void cbe::ChunkManager::CheckChunk( int* pIndices )
 		CreateChunk(pIndices[0], pIndices[1], pIndices[2]);
 	}
 }
+

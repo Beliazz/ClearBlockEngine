@@ -15,6 +15,7 @@
 #include "targetver.h"
 
 #define WIN32_LEAN_AND_MEAN             // Selten verwendete Teile der Windows-Header nicht einbinden.
+#define _CRT_SECURE_NO_WARNINGS
 
 // windows
 #include <Windows.h>

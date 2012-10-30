@@ -133,7 +133,7 @@ bool Chunk::Update()
 void Chunk::Render()
 {
 	EnterCriticalSection(&m_criticalSection);
-	if (m_numTris != 0)
+	if (m_pVertexBuffer && m_pVertexBuffer->GetBufferSize() != 0)
 	{
 		m_pVertexBuffer->Bind();
 		m_pIndexBuffer->Bind();
